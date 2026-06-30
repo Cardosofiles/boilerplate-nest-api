@@ -1,0 +1,58 @@
+services:
+  # ---------------------------------------------------------------------------
+  # Development — hot reload via bind mount. `docker compose up` starts this.
+  # ---------------------------------------------------------------------------
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    image: nest-api:dev
+    container_name: nest-api-dev
+    restart: unless-stopped
+    init: true # PID 1 init (reaps zombies) for the dev container
+    environment:
+      NODE_ENV: development
+      PORT: 3333
+      # Windows/macOS bind mounts don't emit native fs events into the Linux
+      # container — enable polling so the webpack HMR watcher sees changes.
+      # WATCHPACK_POLLING must be a numeric interval (ms): "true" makes
+      # chokidar throw 'interval must be of type number'.
+      CHOKIDAR_USEPOLLING: "true"
+      WATCHPACK_POLLING: "300"
+    ports:
+      - "3333:3333"
+    volumes:
+      # Bind-mount the source for hot reload…
+      - .:/usr/src/app
+      # …but preserve the container's node_modules (built for Linux).
+      - /usr/src/app/node_modules
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3333/health/liveness').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 30s
+      timeout: 3s
+      start_period: 15s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
+  # Production-like — lean runtime image. Opt in with: docker compose --profile prod up
+  # ---------------------------------------------------------------------------
+  api-prod:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    image: nest-api:prod
+    container_name: nest-api-prod
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3333
+    ports:
+      - "3333:3333"
+    profiles:
+      - prod
