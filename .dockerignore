@@ -1,0 +1,40 @@
+# Dependencies & build artifacts
+node_modules
+dist
+coverage
+.pnpm-store
+
+# Version control
+.git
+.gitignore
+.gitattributes
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Environment & secrets (keep the example for reference)
+.env
+.env.*
+!.env.example
+
+# Editor / OS noise
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+
+# CI & documentation
+.github
+*.md
+
+# Logs & temp
+*.log
+npm-debug.log*
+pnpm-debug.log*
+tmp
+
+# Tests (not needed in the build context / image)
+test
+**/*.spec.ts
