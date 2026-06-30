@@ -176,8 +176,8 @@ jobs:
       - name: Smoke test — boot container and probe /health/liveness
         run: |
           docker run -d --name nest-api-ci -p 3333:3333 nest-api:ci
-          curl --fail --retry 20 --retry-delay 3 --retry-connrefused \
-            http://127.0.0.1:3333/health/liveness
+          curl --fail --retry 20 --retry-delay 3 --retry-all-errors \
+            --retry-connrefused http://127.0.0.1:3333/health/liveness
 
       - name: Container logs
         if: always()
