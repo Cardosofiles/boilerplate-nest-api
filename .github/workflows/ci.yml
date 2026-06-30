@@ -1,0 +1,206 @@
+# =============================================================================
+# Continuous Integration — keeps `main` production-ready.
+#
+# Gates every push/PR through static analysis (format, lint, type-check),
+# build, tests and a real production-image smoke test. A single `ci` summary
+# job is exposed so branch protection only needs one required status check.
+# =============================================================================
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref to save minutes and give fast feedback.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: CI only needs to read the repository contents.
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "22"
+  PNPM_VERSION: "10.14.0"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Static analysis — format, lint and strict type-check run in parallel via a
+  # matrix so a single legend tells you exactly which gate failed.
+  # ---------------------------------------------------------------------------
+  code-quality:
+    name: ${{ matrix.task.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        task:
+          - name: Format (prettier)
+            run: pnpm run format:check
+          - name: Lint (eslint, type-aware, zero warnings)
+            run: pnpm run lint:check
+          - name: Type-check (tsc --noEmit)
+            run: pnpm run typecheck
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
+
+      - name: Setup Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: ${{ matrix.task.name }}
+        run: ${{ matrix.task.run }}
+
+  # ---------------------------------------------------------------------------
+  # Build — compile to ./dist and assert the entrypoint artifact exists.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
+
+      - name: Setup Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Verify build artifact
+        run: test -f dist/main.js
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist
+          retention-days: 7
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Tests — unit + e2e (Nest boots in-process via supertest, no services needed).
+  # ---------------------------------------------------------------------------
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
+
+      - name: Setup Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Unit tests (coverage)
+        run: pnpm run test:cov
+
+      - name: E2E tests
+        run: pnpm run test:e2e
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # Docker — build the real multi-stage production image (BuildKit + GHA cache)
+  # and smoke-test it: boot the container and probe the liveness endpoint.
+  # Gated on the cheaper jobs so we never burn build minutes on a broken commit.
+  # ---------------------------------------------------------------------------
+  docker:
+    name: Docker (production image)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [code-quality, build, test]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build production image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: production
+          load: true
+          push: false
+          tags: nest-api:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test — boot container and probe /health/liveness
+        run: |
+          docker run -d --name nest-api-ci -p 3333:3333 nest-api:ci
+          curl --fail --retry 20 --retry-delay 3 --retry-connrefused \
+            http://127.0.0.1:3333/health/liveness
+
+      - name: Container logs
+        if: always()
+        run: docker logs nest-api-ci || true
+
+      - name: Teardown
+        if: always()
+        run: docker rm -f nest-api-ci || true
+
+  # ---------------------------------------------------------------------------
+  # Single required status check for branch protection. Fails if any needed job
+  # failed or was cancelled (a skipped `needs` would otherwise pass silently).
+  # ---------------------------------------------------------------------------
+  ci:
+    name: CI
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [code-quality, build, test, docker]
+    steps:
+      - name: Verify all jobs succeeded
+        run: |
+          if echo "${{ join(needs.*.result, ',') }}" | grep -qE 'failure|cancelled'; then
+            echo "One or more CI jobs failed or were cancelled."
+            exit 1
+          fi
+          echo "All CI jobs passed — main is production-ready."
